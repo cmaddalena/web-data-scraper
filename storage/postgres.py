@@ -48,6 +48,7 @@ class PostgresStorage:
                     UNIQUE(source, external_id)
                 );
 
+                ALTER TABLE scrape_jobs ADD COLUMN IF NOT EXISTS record_type VARCHAR(100);
                 CREATE INDEX IF NOT EXISTS idx_records_source ON scrape_records(source);
                 CREATE INDEX IF NOT EXISTS idx_records_type ON scrape_records(record_type);
                 CREATE INDEX IF NOT EXISTS idx_records_source_type ON scrape_records(source, record_type);
@@ -102,3 +103,11 @@ class PostgresStorage:
     def close(self):
         if self.conn:
             self.conn.close()
+
+def migrate(self):
+    """Migraciones para tablas existentes."""
+    with self.conn.cursor() as cur:
+        cur.execute("""
+            ALTER TABLE scrape_jobs ADD COLUMN IF NOT EXISTS record_type VARCHAR(100);
+        """)
+        self.conn.commit()
