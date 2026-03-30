@@ -1,0 +1,41 @@
+{
+  "zonaprop": {
+    "base_url": "https://www.zonaprop.com.ar",
+    "requires_proxy": true,
+    "delay_between_requests": 3,
+    "retries": 3,
+    "results_per_page": 20,
+    "pagination_pattern": "{base_url}-pagina-{page}.html",
+    "searches": {
+      "departamentos_venta_caba": "/departamentos-venta-capital-federal.html",
+      "departamentos_venta_gba_norte": "/departamentos-venta-zona-norte.html",
+      "departamentos_venta_gba_sur": "/departamentos-venta-zona-sur.html",
+      "departamentos_venta_gba_oeste": "/departamentos-venta-zona-oeste.html",
+      "casas_venta_caba": "/casas-venta-capital-federal.html"
+    }
+  },
+  "argenprop": {
+    "base_url": "https://www.argenprop.com",
+    "requires_proxy": false,
+    "delay_between_requests": 2,
+    "retries": 3,
+    "results_per_page": 20,
+    "pagination_pattern": "{base_url}--pagina-{page}",
+    "searches": {
+      "departamentos_venta_caba": "/departamento/venta/capital-federal",
+      "departamentos_venta_gba": "/departamento/venta/gran-buenos-aires"
+    }
+  },
+  "mercadolibre": {
+    "base_url": "https://inmuebles.mercadolibre.com.ar",
+    "requires_proxy": false,
+    "delay_between_requests": 2,
+    "retries": 3,
+    "results_per_page": 48,
+    "pagination_pattern": "{base_url}_Desde_{page}",
+    "searches": {
+      "departamentos_venta_caba": "/departamentos/venta/capital-federal/",
+      "departamentos_venta_gba": "/departamentos/venta/gran-buenos-aires/"
+    }
+  }
+}
