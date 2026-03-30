@@ -7,11 +7,6 @@ logger = logging.getLogger(__name__)
 
 
 class PostgresStorage:
-    """
-    Storage genérico para cualquier tipo de dato scrapeado.
-    Una sola tabla con JSONB — sin migraciones al agregar nuevos sitios.
-    """
-
     def __init__(self, db_url: str = None):
         self.db_url = db_url or os.getenv("DATABASE_URL")
         self.conn = None
@@ -24,6 +19,9 @@ class PostgresStorage:
 
     def _ensure_tables(self):
         with self.conn.cursor() as cur:
+            # Migraciones primero
+            cur.execute("ALTER TABLE scrape_jobs ADD COLUMN IF NOT EXISTS record_type VARCHAR(100);")
+            
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS scrape_jobs (
                     id SERIAL PRIMARY KEY,
@@ -48,7 +46,6 @@ class PostgresStorage:
                     UNIQUE(source, external_id)
                 );
 
-                ALTER TABLE scrape_jobs ADD COLUMN IF NOT EXISTS record_type VARCHAR(100);
                 CREATE INDEX IF NOT EXISTS idx_records_source ON scrape_records(source);
                 CREATE INDEX IF NOT EXISTS idx_records_type ON scrape_records(record_type);
                 CREATE INDEX IF NOT EXISTS idx_records_source_type ON scrape_records(source, record_type);
@@ -103,11 +100,3 @@ class PostgresStorage:
     def close(self):
         if self.conn:
             self.conn.close()
-
-def migrate(self):
-    """Migraciones para tablas existentes."""
-    with self.conn.cursor() as cur:
-        cur.execute("""
-            ALTER TABLE scrape_jobs ADD COLUMN IF NOT EXISTS record_type VARCHAR(100);
-        """)
-        self.conn.commit()
