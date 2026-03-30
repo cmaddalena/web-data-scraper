@@ -67,7 +67,7 @@ def main():
     if args.output == "postgres":
         from storage.postgres import PostgresStorage
         storage = PostgresStorage()
-        job_id = storage.start_job(args.site, search_url)
+        job_id = storage.start_job(args.site, "property", search_url)
         logger.info(f"Job ID: {job_id}")
     else:
         storage = None
@@ -78,7 +78,7 @@ def main():
         results = scraper.scrape(search_url, max_pages=args.max_pages)
 
         if storage:
-            saved = storage.save_batch(results, job_id)
+            saved = storage.save_batch(results, args.site, "property")
             storage.finish_job(job_id, saved)
             logger.info(f"Saved {saved}/{len(results)} records to PostgreSQL")
             storage.close()

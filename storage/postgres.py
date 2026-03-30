@@ -8,9 +8,8 @@ logger = logging.getLogger(__name__)
 
 class PostgresStorage:
     """
-    Storage genérico para PostgreSQL.
-    Crea las tablas automáticamente si no existen.
-    Usa upsert para evitar duplicados.
+    Storage genérico para cualquier tipo de dato scrapeado.
+    Una sola tabla con JSONB — sin migraciones al agregar nuevos sitios.
     """
 
     def __init__(self, db_url: str = None):
@@ -24,12 +23,12 @@ class PostgresStorage:
         self.conn.autocommit = False
 
     def _ensure_tables(self):
-        """Crea tablas si no existen — genérico para cualquier tipo de scraping."""
         with self.conn.cursor() as cur:
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS scrape_jobs (
                     id SERIAL PRIMARY KEY,
                     source VARCHAR(100) NOT NULL,
+                    record_type VARCHAR(100),
                     search_url TEXT,
                     status VARCHAR(50) DEFAULT 'running',
                     total_results INTEGER DEFAULT 0,
@@ -38,49 +37,31 @@ class PostgresStorage:
                     error TEXT
                 );
 
-                CREATE TABLE IF NOT EXISTS properties (
+                CREATE TABLE IF NOT EXISTS scrape_records (
                     id SERIAL PRIMARY KEY,
                     source VARCHAR(100) NOT NULL,
-                    external_id VARCHAR(200),
-                    titulo TEXT,
-                    descripcion TEXT,
-                    precio NUMERIC,
-                    moneda VARCHAR(10),
-                    operacion VARCHAR(50),
-                    tipo_propiedad VARCHAR(100),
-                    m2_total VARCHAR(50),
-                    m2_cubiertos VARCHAR(50),
-                    ambientes VARCHAR(20),
-                    dormitorios VARCHAR(20),
-                    banos VARCHAR(20),
-                    direccion TEXT,
-                    barrio VARCHAR(200),
-                    partido VARCHAR(200),
-                    latitud FLOAT,
-                    longitud FLOAT,
-                    whatsapp VARCHAR(50),
-                    telefono VARCHAR(50),
-                    inmobiliaria TEXT,
-                    url TEXT,
-                    fecha_publicacion VARCHAR(50),
-                    expensas NUMERIC,
-                    raw_data JSONB,
+                    record_type VARCHAR(100) NOT NULL,
+                    external_id VARCHAR(500),
+                    data JSONB NOT NULL,
                     scraped_at TIMESTAMP DEFAULT NOW(),
                     updated_at TIMESTAMP DEFAULT NOW(),
                     UNIQUE(source, external_id)
                 );
 
-                CREATE INDEX IF NOT EXISTS idx_properties_source ON properties(source);
-                CREATE INDEX IF NOT EXISTS idx_properties_barrio ON properties(barrio);
-                CREATE INDEX IF NOT EXISTS idx_properties_precio ON properties(precio);
+                CREATE INDEX IF NOT EXISTS idx_records_source ON scrape_records(source);
+                CREATE INDEX IF NOT EXISTS idx_records_type ON scrape_records(record_type);
+                CREATE INDEX IF NOT EXISTS idx_records_source_type ON scrape_records(source, record_type);
+                CREATE INDEX IF NOT EXISTS idx_records_data ON scrape_records USING gin(data);
+                CREATE INDEX IF NOT EXISTS idx_records_scraped ON scrape_records(scraped_at);
             """)
             self.conn.commit()
+        logger.info("Tables ready")
 
-    def start_job(self, source: str, search_url: str) -> int:
+    def start_job(self, source: str, record_type: str, search_url: str) -> int:
         with self.conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO scrape_jobs (source, search_url) VALUES (%s, %s) RETURNING id",
-                (source, search_url)
+                "INSERT INTO scrape_jobs (source, record_type, search_url) VALUES (%s, %s, %s) RETURNING id",
+                (source, record_type, search_url)
             )
             job_id = cur.fetchone()[0]
             self.conn.commit()
@@ -89,19 +70,12 @@ class PostgresStorage:
     def finish_job(self, job_id: int, total: int, error: str = None):
         with self.conn.cursor() as cur:
             cur.execute(
-                """UPDATE scrape_jobs SET 
-                    status = %s, total_results = %s, 
-                    finished_at = NOW(), error = %s
-                WHERE id = %s""",
+                "UPDATE scrape_jobs SET status=%s, total_results=%s, finished_at=NOW(), error=%s WHERE id=%s",
                 ("error" if error else "done", total, error, job_id)
             )
             self.conn.commit()
 
-    def save_batch(self, records: list[dict], job_id: int = None) -> int:
-        """
-        Guarda un batch de registros con upsert.
-        Retorna cuántos se insertaron/actualizaron.
-        """
+    def save_batch(self, records: list[dict], source: str, record_type: str) -> int:
         if not records:
             return 0
 
@@ -109,36 +83,20 @@ class PostgresStorage:
         with self.conn.cursor() as cur:
             for record in records:
                 try:
+                    external_id = str(record.get("external_id", ""))
                     cur.execute("""
-                        INSERT INTO properties (
-                            source, external_id, titulo, descripcion,
-                            precio, moneda, operacion, tipo_propiedad,
-                            m2_total, m2_cubiertos, ambientes, dormitorios, banos,
-                            direccion, barrio, partido, latitud, longitud,
-                            whatsapp, telefono, inmobiliaria, url,
-                            fecha_publicacion, expensas, raw_data
-                        ) VALUES (
-                            %(source)s, %(external_id)s, %(titulo)s, %(descripcion)s,
-                            %(precio)s, %(moneda)s, %(operacion)s, %(tipo_propiedad)s,
-                            %(m2_total)s, %(m2_cubiertos)s, %(ambientes)s, %(dormitorios)s, %(banos)s,
-                            %(direccion)s, %(barrio)s, %(partido)s, %(latitud)s, %(longitud)s,
-                            %(whatsapp)s, %(telefono)s, %(inmobiliaria)s, %(url)s,
-                            %(fecha_publicacion)s, %(expensas)s, %(raw_data)s
-                        )
+                        INSERT INTO scrape_records (source, record_type, external_id, data)
+                        VALUES (%s, %s, %s, %s)
                         ON CONFLICT (source, external_id) DO UPDATE SET
-                            precio = EXCLUDED.precio,
-                            whatsapp = EXCLUDED.whatsapp,
-                            telefono = EXCLUDED.telefono,
+                            data = EXCLUDED.data,
                             updated_at = NOW()
-                    """, {**record, "raw_data": psycopg2.extras.Json(record)})
+                    """, (source, record_type, external_id, psycopg2.extras.Json(record)))
                     saved += 1
                 except Exception as e:
                     logger.warning(f"Error saving record {record.get('external_id')}: {e}")
                     self.conn.rollback()
                     continue
-
             self.conn.commit()
-
         return saved
 
     def close(self):
