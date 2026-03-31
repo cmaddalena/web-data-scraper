@@ -4,7 +4,7 @@
     "builder": "NIXPACKS"
   },
   "deploy": {
-    "startCommand": "python main.py --site argenprop --search departamentos_venta_caba --max-pages 5 --output postgres",
-    "restartPolicyType": "NEVER"
+    "startCommand": "python main.py",
+    "restartPolicyType": "ON_FAILURE"
   }
 }
