@@ -1,146 +1,121 @@
-import json
-import re
+import asyncio
 import logging
-from bs4 import BeautifulSoup
-from scrapers.base_scraper import BaseScraper
+from playwright.async_api import async_playwright
 
 logger = logging.getLogger(__name__)
 
 
-class ZonaPropScraper(BaseScraper):
+class ZonaPropScraper:
     """
-    Spider para ZonaProp.
-    ZonaProp embede todos los datos como JSON en el HTML — no necesitamos
-    parsear selectores CSS frágiles.
+    Spider para ZonaProp usando Playwright.
+    ZonaProp renderiza con React — necesitamos browser real.
     """
 
-    def get_total_pages(self, soup: BeautifulSoup) -> int:
-        try:
-            data = self._extract_json(soup)
-            if data:
-                total = data.get("totalCount", 0)
-                per_page = self.config.get("results_per_page", 20)
-                return max(1, (total + per_page - 1) // per_page)
-        except Exception as e:
-            logger.warning(f"Could not get total pages: {e}")
-        return 1
+    def __init__(self, config: dict, proxy_url: str = None):
+        self.config = config
+        self.proxy_url = proxy_url
+        self.cdp_url = "http://localhost:9222"
 
-    def parse_listing_page(self, soup: BeautifulSoup) -> list[dict]:
-        """Extrae propiedades del JSON embebido en el HTML."""
-        data = self._extract_json(soup)
-        if not data:
-            return []
+    def scrape(self, search_url: str, max_pages: int = None) -> list[dict]:
+        return asyncio.run(self._scrape_async(search_url, max_pages))
 
-        postings = data.get("listPostings", [])
-        results = []
-
-        for p in postings:
+    async def _scrape_async(self, search_url: str, max_pages: int = None) -> list[dict]:
+        async with async_playwright() as p:
             try:
-                result = self._parse_posting(p)
-                if result:
-                    results.append(result)
-            except Exception as e:
-                logger.warning(f"Error parsing posting: {e}")
+                browser = await p.chromium.connect_over_cdp(self.cdp_url)
+                ctx = browser.contexts[0]
+                own_browser = False
+                logger.info("Connected via CDP")
+            except Exception:
+                launch_args = ["--no-sandbox", "--disable-dev-shm-usage"]
+                if self.proxy_url:
+                    launch_args.append(f"--proxy-server={self.proxy_url}")
+                ctx = await p.chromium.launch_persistent_context(
+                    "/tmp/zonaprop-profile",
+                    headless=True,
+                    args=launch_args
+                )
+                own_browser = True
+                logger.info("Launched new browser")
 
-        return results
+            all_results = []
+            page = await ctx.new_page()
+            page_num = 1
 
-    def _extract_json(self, soup: BeautifulSoup) -> dict | None:
-        """Extrae el JSON con todos los datos embebido en el HTML."""
-        scripts = soup.find_all("script")
-        for script in scripts:
-            if script.string and "listPostings" in script.string:
-                # Buscar el objeto JSON
-                match = re.search(r"window\.__INITIAL_DATA__\s*=\s*({.*?});", script.string, re.DOTALL)
-                if match:
-                    try:
-                        return json.loads(match.group(1))
-                    except json.JSONDecodeError:
-                        pass
+            try:
+                while True:
+                    url = self._paginate(search_url, page_num)
+                    logger.info(f"Scraping page {page_num}: {url}")
 
-                # Alternativa: buscar directamente el listado
-                match = re.search(r'"listPostings"\s*:\s*(\[.*?\])\s*,\s*"', script.string, re.DOTALL)
-                if match:
-                    try:
-                        return {"listPostings": json.loads(match.group(1))}
-                    except json.JSONDecodeError:
-                        pass
-        return None
+                    await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                    await asyncio.sleep(self.config.get("delay_between_requests", 5))
 
-    def _parse_posting(self, p: dict) -> dict | None:
-        """Normaliza un posting de ZonaProp al formato estándar."""
+                    results = await self._extract_page(page)
+                    if not results:
+                        logger.info(f"No results on page {page_num}, stopping")
+                        break
+
+                    all_results.extend(results)
+                    logger.info(f"Page {page_num}: {len(results)} results (total: {len(all_results)})")
+
+                    if max_pages and page_num >= max_pages:
+                        break
+
+                    has_next = await page.query_selector('[data-qa="PAGING_NEXT"]')
+                    if not has_next:
+                        break
+
+                    page_num += 1
+
+            finally:
+                await page.close()
+                if own_browser:
+                    await ctx.close()
+                else:
+                    await browser.close()
+
+            logger.info(f"Scrape complete: {len(all_results)} total")
+            return all_results
+
+    def _paginate(self, base_url: str, page: int) -> str:
+        if page == 1:
+            return base_url
+        base = base_url.replace(".html", "")
+        return f"{base}-pagina-{page}.html"
+
+    async def _extract_page(self, page) -> list[dict]:
         try:
-            # Precio
-            price_data = p.get("price", {})
-            price = price_data.get("amount")
-            currency = price_data.get("currency", "USD")
-
-            # Ubicación
-            geo = p.get("posting_location", {})
-            location = geo.get("location", {})
-            address = location.get("address", {})
-            barrio = location.get("name", "")
-            partido = location.get("parent", {}).get("name", "")
-
-            # Geolocalización
-            geoloc = geo.get("geolocation", {})
-            lat = geoloc.get("latitude")
-            lon = geoloc.get("longitude")
-
-            # Características
-            features = {}
-            for attr in p.get("main_features", []):
-                features[attr.get("key", "")] = attr.get("value")
-
-            m2_total = features.get("CFT100", features.get("mt2", ""))
-            m2_cubiertos = features.get("CFT101", "")
-            ambientes = features.get("rooms", "")
-            dormitorios = features.get("bedrooms", "")
-            banos = features.get("bathrooms", "")
-
-            # Contacto
-            whatsapp = p.get("whatsapp", "")
-            publisher = p.get("publisher", {})
-            inmobiliaria = publisher.get("name", "")
-            telefono = publisher.get("phone", "")
-
-            # URL
-            url_rel = p.get("url", "")
-            url = f"https://www.zonaprop.com.ar{url_rel}" if url_rel else ""
-
-            return {
-                "source": "zonaprop",
-                "external_id": str(p.get("posting_id", "")),
-                "titulo": p.get("title", ""),
-                "descripcion": p.get("description", "")[:500] if p.get("description") else "",
-                "precio": price,
-                "moneda": currency,
-                "operacion": p.get("operation", {}).get("name", ""),
-                "tipo_propiedad": p.get("real_estate_type", {}).get("name", ""),
-                "m2_total": m2_total,
-                "m2_cubiertos": m2_cubiertos,
-                "ambientes": ambientes,
-                "dormitorios": dormitorios,
-                "banos": banos,
-                "direccion": address.get("name", ""),
-                "barrio": barrio,
-                "partido": partido,
-                "latitud": lat,
-                "longitud": lon,
-                "whatsapp": whatsapp,
-                "telefono": telefono,
-                "inmobiliaria": inmobiliaria,
-                "url": url,
-                "fecha_publicacion": p.get("publication_date", ""),
-                "expensas": p.get("expenses", {}).get("amount") if p.get("expenses") else None,
-            }
+            data = await page.evaluate("""() => {
+                const cards = document.querySelectorAll('[data-posting-id]');
+                const results = [];
+                cards.forEach(card => {
+                    try {
+                        const id = card.getAttribute('data-posting-id');
+                        if (!id) return;
+                        const priceEl = card.querySelector('[data-qa="POSTING_CARD_PRICE"]');
+                        const expEl = card.querySelector('[data-qa="expensas"]');
+                        const addrEl = card.querySelector('[data-qa="POSTING_CARD_LOCATION"]');
+                        const featEls = card.querySelectorAll('[data-qa="POSTING_CARD_FEATURES"] span');
+                        const descEl = card.querySelector('[data-qa="POSTING_CARD_DESCRIPTION"]');
+                        const linkEl = card.querySelector('a[href*="/propiedades/"]');
+                        const tagEls = card.querySelectorAll('[data-qa="POSTING_CARD_TAGS"] span');
+                        results.push({
+                            external_id: id,
+                            source: 'zonaprop',
+                            record_type: 'property',
+                            precio_texto: priceEl ? priceEl.innerText.trim() : '',
+                            expensas_texto: expEl ? expEl.innerText.trim() : '',
+                            direccion: addrEl ? addrEl.innerText.trim() : '',
+                            features: Array.from(featEls).map(el => el.innerText.trim()).filter(t => t),
+                            descripcion: descEl ? descEl.innerText.trim().substring(0, 300) : '',
+                            url: linkEl ? 'https://www.zonaprop.com.ar' + linkEl.getAttribute('href') : '',
+                            tags: Array.from(tagEls).map(el => el.innerText.trim()).filter(t => t)
+                        });
+                    } catch(e) {}
+                });
+                return results;
+            }""")
+            return data or []
         except Exception as e:
-            logger.warning(f"Error parsing posting data: {e}")
-            return None
-
-    def parse_detail_page(self, soup: BeautifulSoup, url: str) -> dict:
-        """
-        Detalle individual de una propiedad.
-        Usado para obtener el teléfono completo que requiere click.
-        Por ahora devuelve vacío — se implementa con Playwright si hace falta.
-        """
-        return {}
+            logger.error(f"Error extracting page: {e}")
+            return []

@@ -4,7 +4,7 @@
     "builder": "NIXPACKS"
   },
   "deploy": {
-    "startCommand": "python main.py --site zonaprop --search departamentos_venta_caba --max-pages 50",
+    "startCommand": "playwright install chromium --with-deps && python main.py --site zonaprop --search departamentos_venta_caba --max-pages 5",
     "restartPolicyType": "NEVER"
   }
 }
