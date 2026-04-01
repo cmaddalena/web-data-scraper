@@ -5,7 +5,7 @@ import os
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_USER_ID = 1  # Charly Maddalena - enterprise
+DEFAULT_USER_ID = 1  # Charly Maddalena
 
 
 class PostgresStorage:
@@ -13,17 +13,59 @@ class PostgresStorage:
         self.db_url = db_url or os.getenv("DATABASE_URL")
         self.conn = None
         self._connect()
+        self._ensure_tables()
 
     def _connect(self):
         self.conn = psycopg2.connect(self.db_url)
         self.conn.autocommit = False
+
+    def _ensure_tables(self):
+        with self.conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS scrape_jobs (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER,
+                    recipe_id INTEGER,
+                    source VARCHAR(100) NOT NULL,
+                    record_type VARCHAR(100) DEFAULT 'generic',
+                    search_url TEXT,
+                    scraper_type VARCHAR(50),
+                    status VARCHAR(50) DEFAULT 'running',
+                    total_results INTEGER DEFAULT 0,
+                    started_at TIMESTAMP DEFAULT NOW(),
+                    finished_at TIMESTAMP,
+                    duration_seconds FLOAT,
+                    error TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS scrape_records (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER,
+                    job_id INTEGER,
+                    source VARCHAR(100) NOT NULL,
+                    record_type VARCHAR(100) NOT NULL,
+                    external_id VARCHAR(500),
+                    data JSONB NOT NULL,
+                    scraped_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(source, external_id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_records_source ON scrape_records(source);
+                CREATE INDEX IF NOT EXISTS idx_records_type ON scrape_records(record_type);
+                CREATE INDEX IF NOT EXISTS idx_records_user ON scrape_records(user_id);
+                CREATE INDEX IF NOT EXISTS idx_records_data ON scrape_records USING gin(data);
+                CREATE INDEX IF NOT EXISTS idx_jobs_status ON scrape_jobs(status);
+            """)
+            self.conn.commit()
+        logger.info("Tables ready")
 
     def start_job(self, source: str, record_type: str, search_url: str,
                   scraper_type: str = "requests", user_id: int = DEFAULT_USER_ID,
                   recipe_id: int = None) -> int:
         with self.conn.cursor() as cur:
             cur.execute("""
-                INSERT INTO scrape_jobs 
+                INSERT INTO scrape_jobs
                     (user_id, recipe_id, source, record_type, search_url, scraper_type)
                 VALUES (%s, %s, %s, %s, %s, %s) RETURNING id
             """, (user_id, recipe_id, source, record_type, search_url, scraper_type))
@@ -35,8 +77,7 @@ class PostgresStorage:
         with self.conn.cursor() as cur:
             cur.execute("""
                 UPDATE scrape_jobs SET
-                    status = %s,
-                    total_results = %s,
+                    status = %s, total_results = %s,
                     finished_at = NOW(),
                     duration_seconds = EXTRACT(EPOCH FROM (NOW() - started_at)),
                     error = %s
@@ -44,30 +85,27 @@ class PostgresStorage:
             """, ("error" if error else "done", total, error, job_id))
             self.conn.commit()
 
-    def save_batch(self, records: list[dict], source: str, record_type: str,
+    def save_batch(self, records: list, source: str, record_type: str,
                    user_id: int = DEFAULT_USER_ID, job_id: int = None) -> int:
         if not records:
             return 0
-
         saved = 0
         with self.conn.cursor() as cur:
             for record in records:
                 try:
                     external_id = str(record.get("external_id", ""))
                     cur.execute("""
-                        INSERT INTO scrape_records 
+                        INSERT INTO scrape_records
                             (user_id, job_id, source, record_type, external_id, data)
                         VALUES (%s, %s, %s, %s, %s, %s)
                         ON CONFLICT (source, external_id) DO UPDATE SET
-                            data = EXCLUDED.data,
-                            updated_at = NOW()
+                            data = EXCLUDED.data, updated_at = NOW()
                     """, (user_id, job_id, source, record_type, external_id,
                           psycopg2.extras.Json(record)))
                     saved += 1
                 except Exception as e:
-                    logger.warning(f"Error saving record {record.get('external_id')}: {e}")
+                    logger.warning(f"Error saving record: {e}")
                     self.conn.rollback()
-                    continue
             self.conn.commit()
         return saved
 
@@ -76,8 +114,7 @@ class PostgresStorage:
             cur.execute("""
                 SELECT r.* FROM site_recipes r
                 JOIN tasks t ON t.id = r.task_id
-                WHERE r.site = %s AND t.name = %s
-                AND r.success_rate > 0.3
+                WHERE r.site = %s AND t.name = %s AND r.success_rate > 0.3
                 ORDER BY r.success_rate DESC LIMIT 1
             """, (site, task_name))
             row = cur.fetchone()
@@ -91,9 +128,8 @@ class PostgresStorage:
             task = cur.fetchone()
             if not task:
                 return
-            task_id = task[0]
             cur.execute("""
-                INSERT INTO site_recipes 
+                INSERT INTO site_recipes
                     (task_id, site, scraper_type, steps, extraction_prompt,
                      has_cloudflare, pagination_pattern, learned_from_ai, updated_at)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, true, NOW())
@@ -101,10 +137,8 @@ class PostgresStorage:
                     scraper_type = EXCLUDED.scraper_type,
                     steps = EXCLUDED.steps,
                     extraction_prompt = EXCLUDED.extraction_prompt,
-                    has_cloudflare = EXCLUDED.has_cloudflare,
-                    pagination_pattern = EXCLUDED.pagination_pattern,
                     updated_at = NOW()
-            """, (task_id, site, scraper_type, psycopg2.extras.Json(steps),
+            """, (task[0], site, scraper_type, psycopg2.extras.Json(steps),
                   extraction_prompt, has_cloudflare, pagination_pattern))
             self.conn.commit()
 
@@ -112,18 +146,16 @@ class PostgresStorage:
         with self.conn.cursor() as cur:
             if success:
                 cur.execute("""
-                    UPDATE site_recipes SET
-                        times_used = times_used + 1,
-                        last_success = NOW(),
-                        success_rate = (success_rate * times_used + 1.0) / (times_used + 1)
+                    UPDATE site_recipes SET times_used = times_used + 1,
+                    last_success = NOW(),
+                    success_rate = LEAST(1.0, (success_rate * times_used + 1.0) / (times_used + 1))
                     WHERE site = %s
                 """, (site,))
             else:
                 cur.execute("""
-                    UPDATE site_recipes SET
-                        fail_count = fail_count + 1,
-                        last_failed = NOW(),
-                        success_rate = (success_rate * times_used) / (times_used + 1)
+                    UPDATE site_recipes SET fail_count = fail_count + 1,
+                    last_failed = NOW(),
+                    success_rate = GREATEST(0.0, (success_rate * times_used) / NULLIF(times_used + 1, 0))
                     WHERE site = %s
                 """, (site,))
             self.conn.commit()
